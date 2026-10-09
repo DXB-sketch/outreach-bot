@@ -48,6 +48,12 @@ CREATE TABLE IF NOT EXISTS scores (
     data_json    TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS research (
+    business_id   INTEGER PRIMARY KEY REFERENCES businesses (id),
+    researched_at TEXT NOT NULL,
+    data_json     TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS drafts (
     business_id INTEGER PRIMARY KEY REFERENCES businesses (id),
     created_at  TEXT NOT NULL,
@@ -170,7 +176,7 @@ def merge_duplicates(conn: sqlite3.Connection) -> list[tuple[int, int]]:
         for field in MERGE_FIELDS:
             if target.get(field) is None:
                 target[field] = row.get(field)
-        for table in ("audits", "scores", "drafts"):
+        for table in ("audits", "scores", "drafts", "research"):
             conn.execute(f"DELETE FROM {table} WHERE business_id = ?", (row["id"],))
         conn.execute("DELETE FROM businesses WHERE id = ?", (row["id"],))
         merged.append((target["id"], row["id"]))
@@ -185,7 +191,7 @@ def merge_duplicates(conn: sqlite3.Connection) -> list[tuple[int, int]]:
 
 
 def save_json_row(conn: sqlite3.Connection, table: str, business_id: int, data: dict, **cols) -> None:
-    stamp_col = {"audits": "audited_at", "scores": "scored_at"}[table]
+    stamp_col = {"audits": "audited_at", "scores": "scored_at", "research": "researched_at"}[table]
     names = ["business_id", stamp_col, "data_json", *cols]
     values = [business_id, now(), json.dumps(data), *cols.values()]
     conn.execute(

@@ -34,6 +34,8 @@ DRAFT_SYSTEM = """You write first-contact outreach for {sender_name}, who runs {
 studio in {sender_location}. Rules:
 - Australian English. Plain, warm, specific, no hype, no buzzwords, no exclamation marks.
 - Write as "I". Never imply a team. Never invent clients, results, statistics or awards.
+- Show you've looked at their business: refer to something specific from the research (a service, an area
+  they cover, something that sets them apart). Never copy marketing claims as fact.
 - Mention one or two concrete things from the audit, framed as lost customers, not as insults.
 - Only state problems listed in the input. If no website was found, say you couldn't find one, never that
   they don't have one. If the site couldn't be checked, don't claim anything about it.
@@ -46,6 +48,7 @@ Location: {address}
 Website: {website}
 Website check: {check}
 Top issues: {issues}
+Research: {research}
 Recommended channel: {channel}
 
 Return JSON:
@@ -87,6 +90,20 @@ def footer(s: Settings) -> str:
     return "\n".join(lines)
 
 
+def _research_summary(profile: dict | None) -> str:
+    if not profile or profile.get("generated_by") == "facts only":
+        return "none"
+    services = ", ".join(x.get("name", "") for x in profile.get("services", [])[:5] if isinstance(x, dict))
+    parts = [
+        f"services: {services}" if services else "",
+        f"areas: {', '.join(profile.get('service_areas', [])[:5])}" if profile.get("service_areas") else "",
+        f"sets them apart: {'; '.join(profile.get('selling_points', [])[:3])}" if profile.get("selling_points") else "",
+        f"pitch angles: {'; '.join(profile.get('pitch_angles', [])[:3])}" if profile.get("pitch_angles") else "",
+        f"tone: {profile['tone']}" if profile.get("tone") else "",
+    ]
+    return " | ".join(p for p in parts if p) or "none"
+
+
 def template_draft(biz: dict, audit: dict | None, s: Settings) -> dict:
     """Fallback used when no LLM is configured or every model fails."""
     issues = (audit or {}).get("issues", [])[:2]
@@ -109,8 +126,10 @@ def template_draft(biz: dict, audit: dict | None, s: Settings) -> dict:
     }
 
 
-def write_draft(llm: LLM | None, biz: dict, audit: dict | None, score: dict, channel: str, s: Settings) -> Path:
+def write_draft(llm: LLM | None, biz: dict, audit: dict | None, score: dict, channel: str, s: Settings,
+                profile: dict | None = None) -> Path:
     llm_review = score.get("llm") or {}
+    profile = profile or {}
     draft = None
     if llm:
         try:
@@ -120,11 +139,12 @@ def write_draft(llm: LLM | None, biz: dict, audit: dict | None, score: dict, cha
                                     sender_location=s.sender_location),
                 DRAFT_PROMPT.format(
                     name=biz["name"],
-                    what_they_do=llm_review.get("what_they_do") or biz.get("category") or "unknown",
+                    what_they_do=profile.get("what_they_do") or llm_review.get("what_they_do") or biz.get("category") or "unknown",
                     address=biz.get("address") or "unknown",
                     website=biz.get("website") or "none",
                     check=_check_summary(audit or {}),
                     issues="; ".join((audit or {}).get("issues", [])[:4]) or "none",
+                    research=_research_summary(profile),
                     channel=channel,
                 ),
                 max_tokens=900,
@@ -149,6 +169,7 @@ def write_draft(llm: LLM | None, biz: dict, audit: dict | None, score: dict, cha
 **Phone:** {biz.get('phone') or '?'} · **Email:** {email_to}
 **Website:** {biz.get('website') or 'none'}
 **Draft written by:** {generated_by}. Read and edit before sending. Nothing has been sent.
+**Client profile:** {(s.data_dir / "research" / path.name) if profile else "not researched yet (outreach research)"}
 
 ## Why they scored this way
 {llm_review.get('summary', '')}

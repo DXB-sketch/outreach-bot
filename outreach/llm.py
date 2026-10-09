@@ -1,8 +1,9 @@
-"""Client for any OpenAI-compatible chat endpoint (e.g. freellmapi.co).
+"""Client for any OpenAI-compatible chat endpoint, by default a self-hosted FreeLLMAPI router.
 
-Two tiers: "fast" models for cheap analysis, "strong" models for writing.
-Each tier is a fallback list: on rate limits or errors the next model is tried.
-Every call's token usage is logged to the llm_usage table.
+Two tiers: "fast" models for cheap analysis, "strong" models for research and writing. With FreeLLMAPI
+the defaults are "auto:fast" and "auto:smart", and the router picks and falls back between providers
+itself. Each tier is also a fallback list here: on rate limits or errors the next entry is tried.
+Every call's token usage, and the model that actually served it, is logged to the llm_usage table.
 """
 
 from __future__ import annotations
@@ -27,6 +28,7 @@ class LLM:
         self.s = settings
         self.conn = conn
         self._last_call = 0.0
+        self.last_served_by: str | None = None
         self.client = httpx.Client(
             base_url=settings.llm_base_url,
             headers={"Authorization": f"Bearer {settings.llm_api_key}"},
@@ -52,6 +54,7 @@ class LLM:
                         "max_tokens": max_tokens,
                         "temperature": 0.4,
                     })
+                    self.last_served_by = resp.headers.get("x-routed-via") or model
                 except httpx.HTTPError as exc:
                     errors.append(f"{model}: {exc}")
                     continue
@@ -66,7 +69,8 @@ class LLM:
                 usage = data.get("usage") or {}
                 self.conn.execute(
                     "INSERT INTO llm_usage (at, model, purpose, prompt_tokens, completion_tokens) VALUES (?, ?, ?, ?, ?)",
-                    (now(), model, purpose, usage.get("prompt_tokens"), usage.get("completion_tokens")),
+                    (now(), resp.headers.get("x-routed-via") or data.get("model") or model, purpose,
+                     usage.get("prompt_tokens"), usage.get("completion_tokens")),
                 )
                 content = (data.get("choices") or [{}])[0].get("message", {}).get("content") or ""
                 if content.strip():

@@ -60,7 +60,7 @@ class Settings:
 
     @property
     def llm_enabled(self) -> bool:
-        return bool(self.llm_base_url and self.llm_api_key and self.llm_fast_models)
+        return bool(self.llm_base_url and self.llm_api_key)
 
     @property
     def user_agent(self) -> str:
@@ -70,11 +70,12 @@ class Settings:
 
 def get_settings() -> Settings:
     load_dotenv()
-    fast = _list("LLM_FAST_MODELS")
-    strong = _list("LLM_STRONG_MODELS") or fast
+    # FreeLLMAPI's router picks the model itself: auto:fast favours speed, auto:smart favours quality.
+    fast = _list("LLM_FAST_MODELS") or ["auto:fast"]
+    strong = _list("LLM_STRONG_MODELS") or ["auto:smart"]
     return Settings(
         data_dir=Path(os.environ.get("OUTREACH_DATA_DIR", "data")),
-        llm_base_url=os.environ.get("LLM_BASE_URL", "").rstrip("/"),
+        llm_base_url=os.environ.get("LLM_BASE_URL", "http://localhost:3001/v1").rstrip("/"),
         llm_api_key=os.environ.get("LLM_API_KEY", ""),
         llm_fast_models=fast,
         llm_strong_models=strong,

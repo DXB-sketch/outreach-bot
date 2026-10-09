@@ -47,6 +47,15 @@ def main(argv: list[str] | None = None) -> None:
     s = sub.add_parser("score", help="score every business")
     s.add_argument("--no-llm", action="store_true")
 
+    rs = sub.add_parser("research", help="deep research on the top leads: client profile, brand assets, mockup copy")
+    rs.add_argument("--top", type=int, default=10)
+    rs.add_argument("--id", type=int, action="append", dest="ids", help="research a specific business (repeatable)")
+    rs.add_argument("--no-llm", action="store_true")
+    rs.add_argument("--refresh", action="store_true", help="redo research that already exists")
+
+    sub.add_parser("llm-test", help="check the LLM connection and show which models are available")
+    sub.add_parser("usage", help="LLM tokens used this month")
+
     dr = sub.add_parser("draft", help="write outreach drafts for the top leads")
     dr.add_argument("--top", type=int, default=10)
     dr.add_argument("--no-llm", action="store_true")
@@ -54,7 +63,7 @@ def main(argv: list[str] | None = None) -> None:
 
     sub.add_parser("report", help="write today's shortlist report")
 
-    r = sub.add_parser("run", help="discover → audit → score → draft → report")
+    r = sub.add_parser("run", help="discover → dedupe → find websites → audit → score → research → draft → report")
     area_args(r)
     r.add_argument("--source", choices=("osm", "places", "all"), default="all")
     r.add_argument("--skip-discover", action="store_true")
@@ -93,6 +102,12 @@ def main(argv: list[str] | None = None) -> None:
         pipeline.audit(conn, settings, args.limit, args.refresh)
     elif args.cmd == "score":
         pipeline.score(conn, settings, not args.no_llm)
+    elif args.cmd == "research":
+        pipeline.research(conn, settings, args.top, args.ids, not args.no_llm, args.refresh)
+    elif args.cmd == "llm-test":
+        raise SystemExit(0 if pipeline.llm_test(conn, settings) else 1)
+    elif args.cmd == "usage":
+        pipeline.usage(conn)
     elif args.cmd == "draft":
         pipeline.draft(conn, settings, args.top, not args.no_llm, args.redo)
     elif args.cmd == "report":
@@ -104,6 +119,7 @@ def main(argv: list[str] | None = None) -> None:
         pipeline.find_websites(conn, settings, args.audit_limit, args.refresh)
         pipeline.audit(conn, settings, args.audit_limit, args.refresh)
         pipeline.score(conn, settings, not args.no_llm)
+        pipeline.research(conn, settings, args.top, use_llm=not args.no_llm, refresh=args.refresh)
         pipeline.draft(conn, settings, args.top, not args.no_llm, args.refresh)
         pipeline.report(conn, settings)
     elif args.cmd == "list":
@@ -123,6 +139,8 @@ def main(argv: list[str] | None = None) -> None:
         if out["audit"]:
             out["audit"].pop("text_excerpt", None)
         out["score"] = load_json(conn.execute("SELECT data_json FROM scores WHERE business_id = ?", (args.id,)).fetchone())
+        research = load_json(conn.execute("SELECT data_json FROM research WHERE business_id = ?", (args.id,)).fetchone())
+        out["research_profile"] = (research or {}).get("profile")
         print(json.dumps(out, indent=2, default=str))
     elif args.cmd == "mark":
         cur = conn.execute("UPDATE businesses SET status = ?, note = COALESCE(?, note) WHERE id = ?",

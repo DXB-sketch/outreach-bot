@@ -5,7 +5,7 @@ potential clients, and writes outreach drafts for the best ones. **It never send
 draft and make contact yourself.
 
 ```
-discover → dedupe → find-websites → audit → score (+ optional LLM review) → draft → report
+discover → dedupe → find-websites → audit → score (+ LLM review) → research → draft → report
 ```
 
 This is the small test version: run it, contact the top 10–15 leads by hand, and see what responds before
@@ -22,10 +22,31 @@ playwright install chromium   # lets the audit read JavaScript-built sites (Wix,
 cp .env.example .env          # then fill it in
 ```
 
-The LLM is optional. Without it, scoring is rules-only and drafts come from a plain template. With it, set
-`LLM_BASE_URL`, `LLM_API_KEY` and model lists for any OpenAI-compatible endpoint (for example freellmapi.co).
-`LLM_FAST_MODELS` is used for lead reviews and `LLM_STRONG_MODELS` for drafts. Each is a comma-separated
-fallback list.
+### Connecting the LLM (FreeLLMAPI)
+
+The LLM is optional. Without it, scoring is rules-only, research profiles are facts-only and drafts come
+from a plain template. With it:
+
+1. Run your FreeLLMAPI router (it serves `http://localhost:3001/v1` by default).
+2. Copy the unified key from the router dashboard's **Keys** page into `.env` as `LLM_API_KEY`.
+   If the router runs on a different machine, set `LLM_BASE_URL` to its address.
+3. Run `outreach llm-test`. It checks the key, lists the models the router can serve right now, makes
+   one call on each tier, and runs a sample review of your top lead.
+
+Two tiers are used. Both default to FreeLLMAPI's own routing, which picks a model and falls back between
+providers by itself:
+
+| Tier | Default | Used for |
+|---|---|---|
+| fast | `auto:fast` | lead reviews (short, many) |
+| strong | `auto:smart` | research profiles and outreach drafts |
+
+To pin specific models, set comma-separated fallback lists in `LLM_FAST_MODELS` / `LLM_STRONG_MODELS`,
+using model ids from `outreach llm-test`. `outreach usage` shows tokens used this month by task and by the
+model that actually served each call.
+
+Rough token use: about 2k tokens per lead review, 10–15k per research profile and 2k per draft. At 10
+researched leads a day that's around 5M tokens a month, a small share of a 170M budget.
 
 ## Usage
 
@@ -43,6 +64,8 @@ outreach dedupe           # merge duplicates already in the database
 outreach find-websites    # look for websites the lead sources didn't list
 outreach audit --limit 100
 outreach score            # --no-llm to skip LLM reviews
+outreach research --top 10           # client profiles for the best leads
+outreach research --id 42 --refresh  # (re)research one business
 outreach draft --top 10
 outreach report           # data/reports/YYYY-MM-DD.md and .csv
 
@@ -59,6 +82,9 @@ processed (for example after updating the tool), use `outreach run --skip-discov
 Output (all under `data/`, which is git-ignored because it holds business contact details):
 
 - `outreach.db`: SQLite database with every business, audit, score, draft and LLM token count
+- `research/NNNNN-name.md`: client profile per researched lead, covering services, areas, selling points,
+  verified customer quotes, website problems, pitch angles, mockup headline and call to action, logo,
+  brand colours, fonts, photos and unknowns
 - `drafts/NNNNN-name.md`: per lead, with the reasons for its score, audit issues, an email draft and a
   phone/walk-in script
 - `reports/YYYY-MM-DD.md` / `.csv`: the ranked shortlist and near misses
@@ -110,6 +136,20 @@ Not realistic clients, so they're dropped at discovery and disqualified if alrea
 Names are checked too ("Royal Hotel", "Smith Lawyers"). Private businesses like driving or dance schools
 are kept. Add your own with `EXCLUDE_KEYWORDS` in `.env`, or edit `EXCLUDED` in `outreach/score.py`.
 
+## Research
+
+`outreach research` runs on the top shortlisted leads, plus anything you've marked `good`. It reads the
+homepage and up to four key pages (about, services, contact, reviews/gallery) and collects:
+
+- the logo, photos, brand colours and fonts
+- phone numbers and email addresses
+- schema.org business data
+- the text of each page
+
+The strong model turns that into a client profile, which then feeds the drafts and, next, the mockups.
+Customer quotes are kept only if they appear word for word on the business's own site, so nothing invented
+can end up in a pitch or mockup. A lead is re-researched automatically when its audit changes.
+
 ## How scoring works
 
 `outreach/score.py` holds every rule and weight. The score has three parts:
@@ -156,8 +196,9 @@ pytest
 
 ## Not built yet (next steps once the test shows results)
 
-- Deeper research on shortlisted leads (about/services pages, Google reviews, socials)
-- Mockup generator from Claude Code-designed templates
+- Mockup generator: 3–4 Claude Code-designed templates filled from the research profile, built only for leads you
+  mark `good`
+- Google reviews in research (via Places)
 - Daily digest by email or Telegram
 - Reddit monitoring for "looking for a web developer" posts
 - PageSpeed Insights for real mobile performance scores

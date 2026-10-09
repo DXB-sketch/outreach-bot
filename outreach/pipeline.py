@@ -10,9 +10,9 @@ from datetime import date
 from pathlib import Path
 
 from . import audit as audit_mod
-from . import drafts, websites
+from . import drafts, research as research_mod, websites
 from .config import Settings
-from .db import load_json, merge_duplicates, save_json_row, upsert_business
+from .db import load_json, merge_duplicates, now, save_json_row, upsert_business
 from .llm import LLM, LLMError
 from .score import excluded_reason, pick_channel, score_business
 from .sources import csv_import, geocode, is_own_site, osm, places
@@ -180,6 +180,57 @@ def shortlist(conn, threshold: int, limit: int | None = None) -> list[tuple[dict
     return out
 
 
+def _slug(name: str) -> str:
+    import re
+    return re.sub(r"[^a-z0-9]+", "-", name.lower()).strip("-")[:50]
+
+
+def load_research(conn, business_id: int) -> dict | None:
+    return load_json(conn.execute("SELECT data_json FROM research WHERE business_id = ?", (business_id,)).fetchone())
+
+
+def research(conn, s: Settings, top: int = 10, ids: list[int] | None = None, use_llm: bool = True,
+             refresh: bool = False) -> int:
+    """Deep research on the best leads (and any marked 'good'). Skips leads already researched since their last audit."""
+    llm = LLM(s, conn) if (use_llm and s.llm_enabled) else None
+    if ids:
+        targets = []
+        for business_id in ids:
+            row = conn.execute("SELECT * FROM businesses WHERE id = ?", (business_id,)).fetchone()
+            if row:
+                aud = load_json(conn.execute("SELECT data_json FROM audits WHERE business_id = ?", (business_id,)).fetchone())
+                targets.append((row_to_biz(row), aud))
+    else:
+        current = shortlist(conn, s.threshold)
+        good = [t for t in current if t[0]["status"] == "good"]
+        targets = [(b, a) for b, _, a in good + [t for t in current if t[0]["status"] != "good"][:top]]
+    done = 0
+    for biz, aud in targets:
+        row = conn.execute(
+            """SELECT r.researched_at, a.audited_at FROM research r LEFT JOIN audits a ON a.business_id = r.business_id
+               WHERE r.business_id = ?""", (biz["id"],)).fetchone()
+        if row and not refresh and (row["audited_at"] is None or row["researched_at"] >= row["audited_at"]):
+            continue
+        print(f"  Researching #{biz['id']} {biz['name']} ...")
+        result = research_mod.research_business(llm, biz, aud, s.sender_email)
+        save_json_row(conn, "research", biz["id"], result)
+        conn.commit()
+        out = s.data_dir / "research"
+        out.mkdir(parents=True, exist_ok=True)
+        path = out / f"{biz['id']:05d}-{_slug(biz['name'])}.md"
+        path.write_text(research_mod.profile_markdown(biz, result["profile"], result["crawl"]))
+        print(f"    {path} ({len(result['crawl'].get('pages', []))} pages, {result['profile'].get('generated_by', 'LLM')})")
+        done += 1
+    print(f"Researched {done} businesses")
+    return done
+
+
+def _researched_after_draft(conn, business_id: int) -> bool:
+    row = conn.execute("""SELECT r.researched_at > d.created_at FROM research r JOIN drafts d ON d.business_id = r.business_id
+                          WHERE r.business_id = ?""", (business_id,)).fetchone()
+    return bool(row and row[0])
+
+
 def draft(conn, s: Settings, top: int = 10, use_llm: bool = True, redo: bool = False) -> int:
     llm = LLM(s, conn) if (use_llm and s.llm_enabled) else None
     current = shortlist(conn, s.threshold)
@@ -189,11 +240,12 @@ def draft(conn, s: Settings, top: int = 10, use_llm: bool = True, redo: bool = F
     for biz, sc, aud in current:
         if count >= top:
             break
-        if biz["id"] in done and not redo:
+        if biz["id"] in done and not redo and not _researched_after_draft(conn, biz["id"]):
             continue
-        path = drafts.write_draft(llm, biz, aud, sc, sc.get("channel", "email"), s)
-        conn.execute("INSERT OR REPLACE INTO drafts (business_id, created_at, channel, path) VALUES (?, datetime('now'), ?, ?)",
-                     (biz["id"], sc.get("channel", "email"), str(path)))
+        path = drafts.write_draft(llm, biz, aud, sc, sc.get("channel", "email"), s,
+                                  (load_research(conn, biz["id"]) or {}).get("profile"))
+        conn.execute("INSERT OR REPLACE INTO drafts (business_id, created_at, channel, path) VALUES (?, ?, ?, ?)",
+                     (biz["id"], now(), sc.get("channel", "email"), str(path)))
         conn.commit()
         count += 1
         print(f"  Draft: {path}")
@@ -265,3 +317,68 @@ def report(conn, s: Settings) -> Path:
                         drafts_by_id.get(biz["id"], "")])
     print(f"Report: {path}")
     return path
+
+
+def llm_test(conn, s: Settings) -> bool:
+    """Check the LLM connection end to end. Prints what works and what to fix."""
+    import httpx
+
+    print(f"Endpoint: {s.llm_base_url}")
+    if not s.llm_api_key:
+        print("LLM_API_KEY is not set. Add your FreeLLMAPI unified key (router dashboard → Keys) to .env.")
+        return False
+    headers = {"Authorization": f"Bearer {s.llm_api_key}"}
+    try:
+        resp = httpx.get(f"{s.llm_base_url}/models", params={"execution_status": "ready"}, headers=headers, timeout=30)
+    except httpx.HTTPError as exc:
+        print(f"Can't reach the router: {exc}\nIs FreeLLMAPI running, and is LLM_BASE_URL right?")
+        return False
+    if resp.status_code in (401, 403):
+        print(f"The router rejected the key (HTTP {resp.status_code}). Check LLM_API_KEY.")
+        return False
+    if resp.status_code < 400:
+        ids = [m.get("id") for m in resp.json().get("data", []) if m.get("id")]
+        print(f"Models ready to serve right now: {len(ids)}")
+        for model_id in ids[:20]:
+            print(f"  {model_id}")
+        if len(ids) > 20:
+            print(f"  ... and {len(ids) - 20} more")
+    else:
+        print(f"Model list unavailable (HTTP {resp.status_code}); trying a chat call anyway.")
+
+    llm = LLM(s, conn)
+    ok = True
+    for tier in ("fast", "strong"):
+        models = s.llm_fast_models if tier == "fast" else s.llm_strong_models
+        start = time.monotonic()
+        try:
+            reply = llm.chat_json(tier, "test", "You are a test endpoint.",
+                                  'Return {"ok": true, "capital_of_queensland": "<answer>"}', max_tokens=300)
+            print(f"{tier:6} ({', '.join(models)}): OK in {time.monotonic() - start:.1f}s via {llm.last_served_by}, "
+                  f"answered {reply.get('capital_of_queensland')!r}")
+        except (LLMError, ValueError) as exc:
+            ok = False
+            print(f"{tier:6} ({', '.join(models)}): FAILED, {exc}")
+    conn.commit()
+
+    top = shortlist(conn, s.threshold, limit=1) or shortlist(conn, 0, limit=1)
+    if ok and top:
+        biz, _, aud = top[0]
+        print(f"\nSample lead review for #{biz['id']} {biz['name']} (not saved):")
+        try:
+            print(json.dumps(drafts.review(llm, biz, aud), indent=2))
+        except (LLMError, ValueError) as exc:
+            print(f"  failed: {exc}")
+        conn.commit()
+    return ok
+
+
+def usage(conn) -> None:
+    rows = conn.execute("""SELECT purpose, model, COUNT(*) AS calls,
+            COALESCE(SUM(prompt_tokens), 0) AS prompt, COALESCE(SUM(completion_tokens), 0) AS completion
+        FROM llm_usage WHERE at >= date('now', 'start of month')
+        GROUP BY purpose, model ORDER BY prompt + completion DESC""").fetchall()
+    total = sum(r["prompt"] + r["completion"] for r in rows)
+    print(f"LLM tokens this month: {total:,}")
+    for r in rows:
+        print(f"  {r['purpose']:<9} {r['model'][:45]:<45} {r['calls']:>5} calls {r['prompt'] + r['completion']:>12,} tokens")
