@@ -25,11 +25,12 @@ FIELDS = ",".join(
 ) + ",nextPageToken"
 
 DEFAULT_QUERIES = [
-    "plumber", "electrician", "builder", "landscaper", "roofer", "painter",
+    "plumber", "builder", "landscaper", "roofer", "painter",
     "air conditioning", "pest control", "cleaning service", "mechanic",
     "dentist", "physiotherapist", "chiropractor", "veterinarian",
-    "accountant", "lawyer", "real estate agency", "hairdresser", "beauty salon",
-    "cafe", "restaurant", "accommodation", "winery", "florist", "dog groomer",
+    "accountant", "bookkeeper", "real estate agency", "hairdresser", "beauty salon",
+    "cafe", "restaurant", "winery", "florist", "dog groomer", "electrician", "fencing",
+    "concreter", "tiler", "arborist", "bathroom renovations",
 ]
 
 

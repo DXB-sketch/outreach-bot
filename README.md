@@ -5,8 +5,7 @@ potential clients, and writes outreach drafts for the best ones. **It never send
 draft and make contact yourself.
 
 ```
-discover → audit → score (+ optional LLM review) → draft → report
- OSM / Google Places / CSV     plain code      rules + fast model        strong model      markdown + CSV
+discover → dedupe → find-websites → audit → score (+ optional LLM review) → draft → report
 ```
 
 This is the small test version: run it, contact the top 10–15 leads by hand, and see what responds before
@@ -18,8 +17,9 @@ Requires Python 3.11+.
 
 ```bash
 python -m venv .venv && . .venv/bin/activate
-pip install -e ".[dev]"
-cp .env.example .env    # then fill it in
+pip install -e ".[dev,browser]"
+playwright install chromium   # lets the audit read JavaScript-built sites (Wix, Squarespace) properly
+cp .env.example .env          # then fill it in
 ```
 
 The LLM is optional. Without it, scoring is rules-only and drafts come from a plain template. With it, set
@@ -39,6 +39,8 @@ Or one stage at a time:
 outreach discover --area "Caboolture QLD" --radius-km 15 --source osm
 outreach discover --area "Caboolture QLD" --source places --query plumber --query dentist
 outreach import-csv my-leads.csv --lat -27.04 --lon 152.87
+outreach dedupe           # merge duplicates already in the database
+outreach find-websites    # look for websites the lead sources didn't list
 outreach audit --limit 100
 outreach score            # --no-llm to skip LLM reviews
 outreach draft --top 10
@@ -49,7 +51,8 @@ outreach show 42
 outreach mark 42 contacted --note "Emailed 9 Oct, follow up Thu"
 ```
 
-Each stage only processes new work, so `run` is safe to repeat. Use `mark` to record outcomes
+Each stage only processes new work, so `run` is safe to repeat. To redo everything for businesses already
+processed (for example after updating the tool), use `outreach run --skip-discover --refresh`. Use `mark` to record outcomes
 (`good | bad | contacted | won | skip`). Leads marked `bad`, `skip` or `won` drop out of the shortlist. The
 `good`/`bad` marks are what you'll use to tune the scoring weights later.
 
@@ -67,6 +70,45 @@ Output (all under `data/`, which is git-ignored because it holds business contac
 | OpenStreetMap (Overpass) | Free | Patchy in rural areas, and few phone numbers or reviews |
 | Google Places API (New) | Paid beyond a free allowance | Much better coverage, plus review counts. Check pricing first |
 | CSV import | Free | Directories, networking events, referrals, anything you collect by hand |
+
+## How websites are checked
+
+Lead sources often don't list a website, especially OpenStreetMap, so "not in the data" never counts as
+"no website". `find-websites` searches, in order:
+
+1. the business's email domain
+2. Google Places (if `GOOGLE_PLACES_API_KEY` is set)
+3. Brave Search (if `BRAVE_API_KEY` is set)
+4. common domain guesses (`bobsplumbing.com.au`, `bobs-plumbing.com.au`, ...)
+
+A found site is only accepted if the page shows the business's name or phone number. Only a business that
+was searched for and not found gets the full "no website" score. The drafts say "I couldn't find a
+website", never "you don't have one".
+
+The audit then tries the listed address, the site root, with and without `www`, and HTTPS then HTTP,
+retrying errors once. It reports one of these results:
+
+| Result | Meaning | Need points |
+|---|---|---|
+| ok | homepage loaded and analysed (re-read in a real browser if it looks empty) | per issue found |
+| blocked / robots | site refused automated checks or asked not to be crawled | 8, so check it yourself |
+| dns_failed | the domain no longer exists | 35 |
+| parked | domain shows a for-sale, expired or placeholder page | 35 |
+| broken | every address returned 404/5xx | 35 |
+
+## Who is excluded
+
+Not realistic clients, so they're dropped at discovery and disqualified if already stored:
+
+- hotels, motels, resorts, hostels
+- lawyers, solicitors, conveyancers
+- hospitals, aged care
+- schools, universities, councils, government, police, churches
+- supermarkets, banks, fuel, pharmacies, car dealers
+- chains and franchises, and closed businesses
+
+Names are checked too ("Royal Hotel", "Smith Lawyers"). Private businesses like driving or dance schools
+are kept. Add your own with `EXCLUDE_KEYWORDS` in `.env`, or edit `EXCLUDED` in `outreach/score.py`.
 
 ## How scoring works
 
@@ -90,8 +132,10 @@ exists, otherwise phone.
 - **Nothing is sent automatically.** Drafts are files for you to edit and send.
 - **Spam Act 2003:** only email addresses a business publishes itself, about their business. Every draft
   identifies you and includes an opt-out line. Honour opt-outs with `outreach mark <id> skip`.
-- **Websites:** respects `robots.txt`, fetches one page per business, and identifies itself in the
-  User-Agent with your contact details. Waits 1 second between sites.
+- **Websites:** respects `robots.txt` (as `MonolithOutreachBot`), fetches only the homepage of each
+  business, and waits 1 second between sites. It sends a normal browser User-Agent, because many small
+  hosting firewalls reject unknown bots outright, and identifies you via the HTTP `From` header
+  (`SENDER_EMAIL`).
 - **Platforms:** doesn't scrape Google Maps, Facebook or freelancing sites, whose terms forbid it. Use the
   Places API or CSV import instead.
 - **Honesty:** drafts are written as a one-person studio and must not invent clients, results or awards.

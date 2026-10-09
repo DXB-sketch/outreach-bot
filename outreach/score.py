@@ -10,31 +10,117 @@ Tune the weights here as you learn which leads actually convert.
 
 from __future__ import annotations
 
+import os
+import re
 from dataclasses import dataclass, field
 from datetime import date
 
-# Keywords matched against the category (e.g. "craft=plumber", "places=dentist").
+# Keywords matched against the start of words in the category (e.g. "craft=plumber" → "craft plumber").
 HIGH_VALUE = (
-    "plumb", "electric", "builder", "construction", "carpent", "roof", "landscap",
-    "gardener", "painter", "hvac", "air_condition", "air conditioning", "pest", "fenc",
-    "concret", "tiler", "glaz", "solar", "pool", "dentist", "physio", "chiro", "osteo",
-    "psycholog", "podiatr", "optometr", "veterinar", "lawyer", "legal", "accountant",
-    "tax_advisor", "financial", "insurance", "real_estate", "estate_agent", "mortgage",
-    "car_repair", "mechanic", "auto", "tyres", "winery", "brewery", "guest_house",
-    "hotel", "motel", "caravan", "accommodation", "wedding", "event", "architect",
-    "surveyor", "cleaning", "removal", "storage", "childcare", "driving_school",
+    "plumb", "electric", "builder", "construction", "carpent", "roof", "landscap", "lawn",
+    "gardener", "painter", "hvac", "air condition", "pest", "fenc", "concret", "tiler", "glaz",
+    "solar", "pool", "dentist", "dental", "physio", "chiro", "osteo", "psycholog", "podiatr",
+    "optometr", "veterinar", "accountant", "accounting", "bookkeep", "tax advisor", "financial",
+    "insurance", "real estate", "estate agent", "mortgage", "car repair", "mechanic", "auto",
+    "tyre", "winery", "brewery", "wedding", "event", "architect", "surveyor", "cleaning",
+    "removal", "storage", "childcare", "child care", "driving school", "excavat", "earthmov",
+    "plaster", "cabinet", "kitchen", "bathroom", "renovat", "handyman", "arborist", "tree",
 )
 MID_VALUE = (
-    "hairdresser", "beauty", "massage", "cafe", "restaurant", "bakery", "butcher",
-    "florist", "pet", "dog", "fitness", "gym", "yoga", "dance", "horse", "farm",
-    "nursery", "garden_centre", "furniture", "hardware", "bicycle", "clothes",
-    "jewel", "gift", "art", "photo", "tattoo", "pub", "bar", "attraction", "camp_site",
+    "hairdresser", "hair", "beauty", "massage", "cafe", "restaurant", "bakery", "butcher",
+    "florist", "pet", "dog", "fitness", "gym", "yoga", "dance", "horse", "farm", "nursery",
+    "garden centre", "furniture", "hardware", "bicycle", "clothes", "jewel", "gift", "art",
+    "photo", "tattoo", "pub", "bar", "attraction", "camp site", "caravan", "guest house",
+    "bed and breakfast", "chalet", "rv park", "campground",
 )
-LOW_VALUE = ("convenience", "fast_food", "kiosk", "newsagent", "charity", "second_hand")
+LOW_VALUE = ("convenience", "fast food", "kiosk", "newsagent", "charity", "second hand")
 
-# Categories that are almost never a fit (big organisations, public bodies).
-EXCLUDED = ("supermarket", "fuel", "bank", "post_office", "government", "department_store",
-            "chemist", "pharmacy", "mall", "car_rental", "atm")
+# Categories that are almost never a realistic client: big organisations, public bodies,
+# and industries that buy websites through head office, booking platforms or specialist agencies.
+EXCLUDED = (
+    # accommodation (booking platforms and chains)
+    "hotel", "motel", "resort", "hostel", "serviced apartment", "extended stay", "inn",
+    # legal
+    "lawyer", "legal", "solicitor", "barrister", "law firm", "notary", "conveyanc", "attorney",
+    # hospitals, aged care and public health
+    "hospital", "nursing home", "aged care", "retirement", "social facility",
+    # public bodies and institutions
+    "government", "council", "police", "fire station", "school", "university", "college",
+    "secondary", "primary school",
+    "kindergarten", "library", "place of worship", "church", "community centre", "post office",
+    # big retail and finance
+    "supermarket", "department store", "mall", "fuel", "petrol", "gas station", "bank", "atm",
+    "chemist", "pharmacy", "car rental", "car dealer", "car sales",
+)
+
+# Whole words that rule a business out by name, whatever its category says.
+EXCLUDED_NAME_WORDS = (
+    "hospital", "hotel", "motel", "motor inn", "resort", "hostel", "lawyers", "lawyer", "law",
+    "legal", "solicitors", "solicitor", "barristers", "conveyancing", "council", "school",
+    "college", "university", "tafe", "church", "parish", "aged care", "retirement",
+    "nursing home", "police",
+)
+
+# Small, private businesses whose names or categories contain an institution word ("school", "college").
+NOT_INSTITUTIONS = ("driving", "dance", "music", "swim", "martial", "karate", "tutor", "art", "surf", "riding", "beauty", "hair", "dog", "barber")
+INSTITUTION_WORDS = ("school", "college", "university", "academy", "secondary", "primary school")
+
+
+def _words(text: str | None) -> str:
+    return " " + re.sub(r"[^a-z0-9]+", " ", (text or "").lower()).strip() + " "
+
+
+def _extra_exclusions() -> tuple[str, ...]:
+    """Your own exclusions: EXCLUDE_KEYWORDS=florist,real estate in .env."""
+    return tuple(k.strip().lower() for k in os.environ.get("EXCLUDE_KEYWORDS", "").split(",") if k.strip())
+
+
+def _matches(words: str, keywords) -> str | None:
+    """First keyword found at the start of a word, ignoring "school"-type words for private businesses."""
+    private = any(" " + k in words for k in NOT_INSTITUTIONS)
+    return next((k for k in keywords if " " + k in words and not (private and k in INSTITUTION_WORDS)), None)
+
+
+def category_text(biz_or_category) -> str:
+    """Category plus any extra type labels (Google Places gives several)."""
+    if isinstance(biz_or_category, dict):
+        tags = biz_or_category.get("tags") or {}
+        extra = " ".join(tags.get("types") or [])
+        return _words(f"{biz_or_category.get('category') or ''} {extra}")
+    return _words(biz_or_category)
+
+
+def category_tier(biz_or_category) -> str:
+    c = category_text(biz_or_category)
+    if _matches(c, EXCLUDED + _extra_exclusions()):
+        return "excluded"
+    if _matches(c, HIGH_VALUE):
+        return "high"
+    if _matches(c, LOW_VALUE):
+        return "low"
+    if _matches(c, MID_VALUE):
+        return "mid"
+    return "unknown"
+
+
+def excluded_reason(biz: dict) -> str | None:
+    """Why this business is not a realistic client, or None. Used at discovery and scoring time."""
+    c = category_text(biz)
+    hit = _matches(c, EXCLUDED + _extra_exclusions())
+    if hit:
+        return f"Excluded category ({hit.strip()}: {biz.get('category')})"
+    name = _words(biz.get("name"))
+    private = any(" " + k in name for k in NOT_INSTITUTIONS)
+    hit = next((w for w in EXCLUDED_NAME_WORDS + _extra_exclusions()
+                if f" {w} " in name and not (private and w in INSTITUTION_WORDS)), None)
+    if hit:
+        return f"Excluded by name ('{hit}')"
+    tags = biz.get("tags") or {}
+    if tags.get("brand") or tags.get("brand:wikidata"):
+        return f"Chain/franchise ({tags.get('brand') or 'brand tag'}), marketing decided at head office"
+    if tags.get("businessStatus") in ("CLOSED_PERMANENTLY", "CLOSED_TEMPORARILY"):
+        return "Listed as closed"
+    return None
 
 
 @dataclass
@@ -51,27 +137,10 @@ class ScoreResult:
         return self.__dict__.copy()
 
 
-def category_tier(category: str | None) -> str:
-    c = (category or "").lower()
-    if any(k in c for k in EXCLUDED):
-        return "excluded"
-    if any(k in c for k in HIGH_VALUE):
-        return "high"
-    if any(k in c for k in LOW_VALUE):
-        return "low"
-    if any(k in c for k in MID_VALUE):
-        return "mid"
-    return "unknown"
-
-
-def disqualify(biz: dict, tier: str) -> str | None:
-    tags = biz.get("tags") or {}
-    if tags.get("brand") or tags.get("brand:wikidata"):
-        return f"Chain/franchise ({tags.get('brand') or 'brand tag'}), marketing decided at head office"
-    if tags.get("businessStatus") in ("CLOSED_PERMANENTLY", "CLOSED_TEMPORARILY"):
-        return "Listed as closed"
-    if tier == "excluded":
-        return f"Category unlikely to buy ({biz.get('category')})"
+def disqualify(biz: dict) -> str | None:
+    reason = excluded_reason(biz)
+    if reason:
+        return reason
     if biz.get("status") in ("bad", "skip", "won"):
         return f"Marked '{biz['status']}' by you"
     return None
@@ -82,15 +151,23 @@ def score_need(audit: dict | None, reasons: list[str]) -> int:
         reasons.append("need: not audited yet (+10)")
         return 10
     if not audit.get("has_website"):
-        pts = 28 if not audit.get("social_only") else 30
-        reasons.append(f"need: {'only a social/directory page' if audit.get('social_only') else 'no website'} (+{pts})")
-        return pts
-    if not audit.get("reachable"):
-        reasons.append("need: website down or broken (+35)")
-        return 35
-    if audit.get("robots_blocked"):
-        reasons.append("need: site blocks crawlers, unknown quality (+8)")
+        if audit.get("social_only"):
+            reasons.append("need: only a social/directory page, no website of their own (+30)")
+            return 30
+        if audit.get("website_search") in (None, "not searched"):
+            reasons.append("need: no website listed and not searched for yet (+12)")
+            return 12
+        reasons.append(f"need: no website found after searching {audit['website_search']} (+28)")
+        return 28
+    status = audit.get("check_status")
+    if audit.get("reachable") is None or status in ("blocked", "robots"):
+        reasons.append("need: site couldn't be checked automatically, so look at it yourself (+8)")
         return 8
+    if not audit.get("reachable"):
+        label = {"dns_failed": "website domain no longer works", "parked": "domain shows a parked/placeholder page",
+                 "broken": "website returns errors on every address tried"}.get(status, "website down or broken")
+        reasons.append(f"need: {label} (+35)")
+        return 35
 
     year_now = date.today().year
     rules = [
@@ -179,8 +256,8 @@ def score_fit(biz: dict, audit: dict | None, reasons: list[str]) -> int:
 
 
 def score_business(biz: dict, audit: dict | None) -> ScoreResult:
-    tier = category_tier(biz.get("category"))
-    reason = disqualify(biz, tier)
+    tier = category_tier(biz)
+    reason = disqualify(biz)
     if reason:
         return ScoreResult(0, 0, 0, 0, tier, [reason], disqualified=reason)
     reasons: list[str] = []

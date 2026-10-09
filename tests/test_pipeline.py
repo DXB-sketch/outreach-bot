@@ -4,7 +4,7 @@ from pathlib import Path
 import pytest
 
 from outreach import audit as audit_mod
-from outreach import pipeline
+from outreach import pipeline, websites
 from outreach.config import Settings
 from outreach.db import connect
 from outreach.llm import LLM, parse_json
@@ -28,7 +28,7 @@ MODERN_SITE = f"""<!doctype html><html><head><title>Acme Dental | Caboolture</ti
 def settings(tmp_path: Path, **kw) -> Settings:
     base = dict(
         data_dir=tmp_path, llm_base_url="", llm_api_key="", llm_fast_models=[], llm_strong_models=[],
-        llm_min_interval=0, google_places_api_key="", sender_name="Dex", sender_business="Monolith Web Studio",
+        llm_min_interval=0, google_places_api_key="", brave_api_key="", sender_name="Dex", sender_business="Monolith Web Studio",
         sender_email="", sender_phone="0400 000 000", sender_website="https://example.com",
         sender_location="Wamuran, QLD", threshold=60,
     )
@@ -58,7 +58,7 @@ def test_scores_rank_sensibly():
     old["has_website"] = old["reachable"] = True
     modern = audit_mod.analyse_html(MODERN_SITE, "https://x.com.au/", 400, 20)
     modern["has_website"] = modern["reachable"] = True
-    no_site = {"has_website": False, "issues": ["No website of their own"]}
+    no_site = {"has_website": False, "website_search": "email domain, domain guesses", "issues": ["No website found"]}
 
     s_old = score_business(plumber, old)
     s_none = score_business(plumber, no_site)
@@ -107,15 +107,18 @@ def test_end_to_end_with_csv(tmp_path, monkeypatch):
     pages = {"bobsplumbing": (OLD_SITE, "http://bobsplumbing.com.au/"),
              "acmedental": (MODERN_SITE, "https://acmedental.com.au/")}
 
-    def fake_fetch(url, ua):
+    def fake_fetch(url, contact="", tries=2):
         html, final = next(v for k, v in pages.items() if k in url)
-        return {"reachable": True, "status": 200, "final_url": final, "load_ms": 500, "page_kb": 10, "html": html}
+        return {"ok": True, "status": 200, "final_url": final, "load_ms": 500, "page_kb": 10, "html": html,
+                "ssl_error": False, "attempts": []}
 
     monkeypatch.setattr(audit_mod, "fetch", fake_fetch)
+    monkeypatch.setattr(websites, "_resolves", lambda host: False)  # no network in tests
     s = settings(tmp_path)
     conn = connect(s.db_path)
     assert pipeline.import_csv(conn, s, csv_path, (-27.04, 152.87)) == 3
     assert pipeline.import_csv(conn, s, csv_path, (-27.04, 152.87)) == 0  # idempotent
+    pipeline.find_websites(conn, s)
     pipeline.audit(conn, s, delay=0)
     pipeline.score(conn, s, use_llm=False)
     names = [b["name"] for b, _, _ in pipeline.shortlist(conn, s.threshold)]
@@ -135,6 +138,8 @@ def test_llm_review_and_draft_used_when_configured(tmp_path, monkeypatch):
     csv_path = tmp_path / "l.csv"
     csv_path.write_text("name,category,address,phone,lat,lon\nTiny Tiles,tiler,1 St,0400,-27.04,152.87\n")
     pipeline.import_csv(conn, s, csv_path, (-27.04, 152.87))
+    monkeypatch.setattr(websites, "_resolves", lambda host: False)
+    pipeline.find_websites(conn, s)
     pipeline.audit(conn, s, delay=0)
 
     calls = []

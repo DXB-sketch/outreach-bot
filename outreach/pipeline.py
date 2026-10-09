@@ -10,12 +10,12 @@ from datetime import date
 from pathlib import Path
 
 from . import audit as audit_mod
-from . import drafts
+from . import drafts, websites
 from .config import Settings
-from .db import load_json, save_json_row, upsert_business
+from .db import load_json, merge_duplicates, save_json_row, upsert_business
 from .llm import LLM, LLMError
-from .score import pick_channel, score_business
-from .sources import csv_import, geocode, osm, places
+from .score import excluded_reason, pick_channel, score_business
+from .sources import csv_import, geocode, is_own_site, osm, places
 
 
 def row_to_biz(row: sqlite3.Row) -> dict:
@@ -30,6 +30,21 @@ def resolve_centre(s: Settings, area: str, lat: float | None, lon: float | None)
     return geocode(area, s.user_agent)
 
 
+def _store(conn, found, label: str) -> int:
+    """Save discovered businesses, skipping excluded ones and duplicates."""
+    added = excluded = dupes = 0
+    for biz in found:
+        if excluded_reason(biz):
+            excluded += 1
+        elif upsert_business(conn, biz):
+            added += 1
+        else:
+            dupes += 1
+    conn.commit()
+    print(f"  {label}: {added} new, {dupes} duplicates or already known, {excluded} excluded")
+    return added
+
+
 def discover(conn, s: Settings, area: str, radius_km: float, source: str,
              lat: float | None = None, lon: float | None = None,
              queries: list[str] | None = None, pages: int = 1) -> int:
@@ -37,42 +52,73 @@ def discover(conn, s: Settings, area: str, radius_km: float, source: str,
     print(f"Searching within {radius_km} km of {area} {centre}")
     added = 0
     if source in ("osm", "all"):
-        n = sum(upsert_business(conn, b) for b in osm.discover(*centre, radius_km, s.user_agent))
-        print(f"  OpenStreetMap: {n} new")
-        added += n
+        added += _store(conn, osm.discover(*centre, radius_km, s.user_agent), "OpenStreetMap")
     if source in ("places", "all"):
         if not s.google_places_api_key:
             print("  Google Places: skipped (GOOGLE_PLACES_API_KEY not set)")
         else:
-            n = sum(upsert_business(conn, b) for b in places.discover(
-                s.google_places_api_key, area, *centre, radius_km, queries, pages))
-            print(f"  Google Places: {n} new")
-            added += n
-    conn.commit()
+            added += _store(conn, places.discover(
+                s.google_places_api_key, area, *centre, radius_km, queries, pages), "Google Places")
     return added
 
 
 def import_csv(conn, s: Settings, path: Path, centre: tuple[float, float] | None) -> int:
-    n = sum(upsert_business(conn, b) for b in csv_import.discover(path, centre))
-    conn.commit()
-    print(f"Imported {n} new businesses from {path}")
-    return n
+    return _store(conn, csv_import.discover(path, centre), f"CSV {path}")
+
+
+def dedupe(conn) -> int:
+    merged = merge_duplicates(conn)
+    for kept, removed in merged:
+        print(f"  merged #{removed} into #{kept}")
+    print(f"Merged {len(merged)} duplicate records")
+    return len(merged)
+
+
+def _active_rows(conn, where: str = "1=1", params: tuple = ()) -> list[dict]:
+    rows = conn.execute(
+        f"SELECT * FROM businesses WHERE status NOT IN ('bad','skip','won') AND {where} "
+        "ORDER BY distance_km IS NULL, distance_km", params).fetchall()
+    return [b for b in map(row_to_biz, rows) if not excluded_reason(b)]
+
+
+def find_websites(conn, s: Settings, limit: int | None = None, refresh: bool = False) -> int:
+    """Look for websites the lead sources didn't list. Businesses already searched are skipped."""
+    where = "(website IS NULL OR website_status IS NULL OR website_status LIKE 'not_found%')" if refresh \
+        else "website_status IS NULL"
+    todo = [b for b in _active_rows(conn, where) if not b.get("website") or not is_own_site(b["website"])]
+    todo = todo[:limit] if limit else todo
+    found = 0
+    for i, biz in enumerate(todo, 1):
+        result = websites.find_website(biz, s.google_places_api_key, s.brave_api_key, s.sender_email)
+        extra = result.get("places") or {}
+        for field in ("phone", "rating", "review_count"):
+            if extra.get(field) is not None and biz.get(field) is None:
+                conn.execute(f"UPDATE businesses SET {field} = ? WHERE id = ?", (extra[field], biz["id"]))
+        if result["website"]:
+            found += 1
+            conn.execute("UPDATE businesses SET website = ?, website_status = ? WHERE id = ?",
+                         (result["website"], f"found:{result['method']}", biz["id"]))
+            print(f"  [{i}/{len(todo)}] {biz['name']}: {result['website']} (via {result['method']})")
+        else:
+            conn.execute("UPDATE businesses SET website_status = ? WHERE id = ?",
+                         ("not_found:" + ", ".join(result["searched"]), biz["id"]))
+            print(f"  [{i}/{len(todo)}] {biz['name']}: none found")
+        conn.execute("DELETE FROM audits WHERE business_id = ?", (biz["id"],))  # re-audit with the new info
+        conn.commit()
+    print(f"Found websites for {found} of {len(todo)} businesses")
+    return found
 
 
 def audit(conn, s: Settings, limit: int | None = None, refresh: bool = False, delay: float = 1.0) -> int:
-    sql = "SELECT b.* FROM businesses b LEFT JOIN audits a ON a.business_id = b.id WHERE b.status NOT IN ('bad','skip','won')"
-    if not refresh:
-        sql += " AND a.business_id IS NULL"
-    sql += " ORDER BY b.distance_km IS NULL, b.distance_km"
-    if limit:
-        sql += f" LIMIT {int(limit)}"
-    rows = conn.execute(sql).fetchall()
-    for i, row in enumerate(rows, 1):
-        biz = row_to_biz(row)
-        result = audit_mod.audit_business(biz, s.user_agent)
+    where = "1=1" if refresh else "id NOT IN (SELECT business_id FROM audits)"
+    rows = _active_rows(conn, where)
+    rows = rows[:limit] if limit else rows
+    for i, biz in enumerate(rows, 1):
+        result = audit_mod.audit_business(biz, s.sender_email)
         save_json_row(conn, "audits", biz["id"], result)
         conn.commit()
-        print(f"  [{i}/{len(rows)}] {biz['name']}: {len(result.get('issues', []))} issues")
+        state = result.get("check_status") or ("no website" if not result.get("has_website") else "")
+        print(f"  [{i}/{len(rows)}] {biz['name']}: {state}, {len(result.get('issues', []))} issues")
         if biz.get("website"):
             time.sleep(delay)
     return len(rows)
@@ -84,12 +130,15 @@ def score(conn, s: Settings, use_llm: bool = True) -> int:
     reviewed = 0
     for row in rows:
         biz = row_to_biz(row)
-        aud = load_json(conn.execute("SELECT data_json FROM audits WHERE business_id = ?", (biz["id"],)).fetchone())
+        audit_row = conn.execute("SELECT data_json, audited_at FROM audits WHERE business_id = ?", (biz["id"],)).fetchone()
+        aud = load_json(audit_row)
         result = score_business(biz, aud).as_dict()
+        result["audited_at"] = audit_row["audited_at"] if audit_row else None
         previous = load_json(conn.execute("SELECT data_json FROM scores WHERE business_id = ?", (biz["id"],)).fetchone())
 
-        # Only spend LLM tokens on leads that are close to (or over) the threshold.
-        llm_review = (previous or {}).get("llm")
+        # Only spend LLM tokens on leads that are close to (or over) the threshold, and only
+        # reuse an earlier review if it was based on the same audit.
+        llm_review = (previous or {}).get("llm") if (previous or {}).get("audited_at") == result["audited_at"] else None
         if llm and not llm_review and not result["disqualified"] and result["score"] >= s.threshold - 10:
             try:
                 llm_review = drafts.review(llm, biz, aud)
@@ -133,9 +182,11 @@ def shortlist(conn, threshold: int, limit: int | None = None) -> list[tuple[dict
 
 def draft(conn, s: Settings, top: int = 10, use_llm: bool = True, redo: bool = False) -> int:
     llm = LLM(s, conn) if (use_llm and s.llm_enabled) else None
+    current = shortlist(conn, s.threshold)
+    _archive_stale_drafts(conn, s, {b["id"] for b, _, _ in current})
     done = {r[0] for r in conn.execute("SELECT business_id FROM drafts")}
     count = 0
-    for biz, sc, aud in shortlist(conn, s.threshold):
+    for biz, sc, aud in current:
         if count >= top:
             break
         if biz["id"] in done and not redo:
@@ -148,6 +199,28 @@ def draft(conn, s: Settings, top: int = 10, use_llm: bool = True, redo: bool = F
         print(f"  Draft: {path}")
     print(f"Wrote {count} new drafts")
     return count
+
+
+def _archive_stale_drafts(conn, s: Settings, shortlisted: set[int]) -> None:
+    """Move drafts for leads that dropped off the shortlist (excluded, merged, re-scored) to drafts/archive/."""
+    contacted = {r[0] for r in conn.execute("SELECT id FROM businesses WHERE status IN ('contacted','won')")}
+    for business_id, path in conn.execute("SELECT business_id, path FROM drafts").fetchall():
+        if business_id in shortlisted or business_id in contacted:
+            continue
+        src = Path(path)
+        if src.exists():
+            dest = s.drafts_dir / "archive" / src.name
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            src.replace(dest)
+        conn.execute("DELETE FROM drafts WHERE business_id = ?", (business_id,))
+    # Drafts of businesses removed by dedupe have no database row any more.
+    known = {Path(r[0]).name for r in conn.execute("SELECT path FROM drafts")}
+    if s.drafts_dir.exists():
+        for f in s.drafts_dir.glob("*.md"):
+            if f.name not in known:
+                (s.drafts_dir / "archive").mkdir(parents=True, exist_ok=True)
+                f.replace(s.drafts_dir / "archive" / f.name)
+    conn.commit()
 
 
 def report(conn, s: Settings) -> Path:

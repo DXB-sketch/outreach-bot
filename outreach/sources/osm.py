@@ -16,7 +16,7 @@ MIRRORS = [
 ]
 
 AMENITY = "restaurant|cafe|dentist|doctors|clinic|veterinary|car_wash|childcare|driving_school|pub|bar|fast_food"
-TOURISM = "hotel|motel|guest_house|caravan_site|camp_site|chalet|apartment|attraction"
+TOURISM = "guest_house|caravan_site|camp_site|chalet|attraction"
 LEISURE = "fitness_centre|sports_centre|horse_riding|golf_course|dance"
 
 # Tag keys checked (in order) to name a business's category.
@@ -29,8 +29,8 @@ def build_query(lat: float, lon: float, radius_m: int) -> str:
 [out:json][timeout:120];
 (
   nwr{around}["name"]["craft"];
-  nwr{around}["name"]["healthcare"];
-  nwr{around}["name"]["office"]["office"!~"^(government|diplomatic|religion)$"];
+  nwr{around}["name"]["healthcare"]["healthcare"!~"^(hospital|blood_donation)$"];
+  nwr{around}["name"]["office"]["office"!~"^(government|diplomatic|religion|lawyer|notary|ngo|political_party|association)$"];
   nwr{around}["name"]["shop"]["shop"!="vacant"];
   nwr{around}["name"]["amenity"~"^({AMENITY})$"];
   nwr{around}["name"]["tourism"~"^({TOURISM})$"];

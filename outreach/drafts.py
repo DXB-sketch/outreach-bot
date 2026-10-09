@@ -17,6 +17,7 @@ Category: {category}
 Location: {address} ({distance} km from the studio)
 Reviews: {reviews}
 Website: {website}
+Website check: {check}
 Audit issues: {issues}
 Homepage text (truncated): {excerpt}
 
@@ -34,6 +35,8 @@ studio in {sender_location}. Rules:
 - Australian English. Plain, warm, specific, no hype, no buzzwords, no exclamation marks.
 - Write as "I". Never imply a team. Never invent clients, results, statistics or awards.
 - Mention one or two concrete things from the audit, framed as lost customers, not as insults.
+- Only state problems listed in the input. If no website was found, say you couldn't find one, never that
+  they don't have one. If the site couldn't be checked, don't claim anything about it.
 - Offer to send a free one-page mockup of what their site could look like. Soft call to action.
 - Email body under 120 words. Do not add a signature or unsubscribe line (added automatically)."""
 
@@ -41,6 +44,7 @@ DRAFT_PROMPT = """Business: {name}
 What they do: {what_they_do}
 Location: {address}
 Website: {website}
+Website check: {check}
 Top issues: {issues}
 Recommended channel: {channel}
 
@@ -59,9 +63,20 @@ def review(llm: LLM, biz: dict, audit: dict | None) -> dict:
         distance=biz.get("distance_km") if biz.get("distance_km") is not None else "?",
         reviews=f"{biz.get('review_count')} reviews, rating {biz.get('rating')}" if biz.get("review_count") is not None else "unknown",
         website=biz.get("website") or "none",
+        check=_check_summary(audit),
         issues="; ".join(audit.get("issues", [])) or "none found",
         excerpt=(audit.get("text_excerpt") or "")[:1500] or "n/a",
     ), max_tokens=500)
+
+
+def _check_summary(audit: dict) -> str:
+    if not audit.get("has_website"):
+        if audit.get("social_only"):
+            return "they only have a social media or directory page"
+        return f"no website found (searched: {audit.get('website_search', 'unknown')}). They may still have one; say 'I couldn't find a website', never 'you don't have one'"
+    return {"ok": "homepage loaded and was analysed", "blocked": "site refused automated checks, so quality is unknown",
+            "robots": "site asks robots not to crawl it, so quality is unknown"}.get(
+        audit.get("check_status"), f"site is broken ({audit.get('check_status')})")
 
 
 def footer(s: Settings) -> str:
@@ -76,7 +91,9 @@ def template_draft(biz: dict, audit: dict | None, s: Settings) -> dict:
     """Fallback used when no LLM is configured or every model fails."""
     issues = (audit or {}).get("issues", [])[:2]
     first = biz["name"]
-    if issues and (audit or {}).get("has_website"):
+    if (audit or {}).get("has_website") and (audit or {}).get("reachable") is None:
+        observation = "I came across your business and had a few ideas for how your website could bring in more enquiries."
+    elif issues and (audit or {}).get("has_website"):
         observation = "I had a look at your website and noticed a couple of things that might be costing you enquiries: " + \
             "; ".join(i[0].lower() + i[1:] for i in issues) + "."
     else:
@@ -106,6 +123,7 @@ def write_draft(llm: LLM | None, biz: dict, audit: dict | None, score: dict, cha
                     what_they_do=llm_review.get("what_they_do") or biz.get("category") or "unknown",
                     address=biz.get("address") or "unknown",
                     website=biz.get("website") or "none",
+                    check=_check_summary(audit or {}),
                     issues="; ".join((audit or {}).get("issues", [])[:4]) or "none",
                     channel=channel,
                 ),

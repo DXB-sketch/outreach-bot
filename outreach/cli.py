@@ -34,6 +34,12 @@ def main(argv: list[str] | None = None) -> None:
     i.add_argument("--lat", type=float)
     i.add_argument("--lon", type=float)
 
+    sub.add_parser("dedupe", help="merge duplicate businesses already in the database")
+
+    fw = sub.add_parser("find-websites", help="look for websites the lead sources didn't list")
+    fw.add_argument("--limit", type=int)
+    fw.add_argument("--refresh", action="store_true", help="search again for businesses where none was found")
+
     a = sub.add_parser("audit", help="audit websites")
     a.add_argument("--limit", type=int)
     a.add_argument("--refresh", action="store_true", help="re-audit already audited businesses")
@@ -52,6 +58,8 @@ def main(argv: list[str] | None = None) -> None:
     area_args(r)
     r.add_argument("--source", choices=("osm", "places", "all"), default="all")
     r.add_argument("--skip-discover", action="store_true")
+    r.add_argument("--refresh", action="store_true",
+                   help="redo website searches, audits and drafts for businesses already processed")
     r.add_argument("--audit-limit", type=int, default=150)
     r.add_argument("--top", type=int, default=10)
     r.add_argument("--no-llm", action="store_true")
@@ -77,6 +85,10 @@ def main(argv: list[str] | None = None) -> None:
     elif args.cmd == "import-csv":
         centre = (args.lat, args.lon) if args.lat is not None and args.lon is not None else None
         pipeline.import_csv(conn, settings, args.path, centre)
+    elif args.cmd == "dedupe":
+        pipeline.dedupe(conn)
+    elif args.cmd == "find-websites":
+        pipeline.find_websites(conn, settings, args.limit, args.refresh)
     elif args.cmd == "audit":
         pipeline.audit(conn, settings, args.limit, args.refresh)
     elif args.cmd == "score":
@@ -88,9 +100,11 @@ def main(argv: list[str] | None = None) -> None:
     elif args.cmd == "run":
         if not args.skip_discover:
             pipeline.discover(conn, settings, args.area, args.radius_km, args.source, args.lat, args.lon)
-        pipeline.audit(conn, settings, args.audit_limit)
+        pipeline.dedupe(conn)
+        pipeline.find_websites(conn, settings, args.audit_limit, args.refresh)
+        pipeline.audit(conn, settings, args.audit_limit, args.refresh)
         pipeline.score(conn, settings, not args.no_llm)
-        pipeline.draft(conn, settings, args.top, not args.no_llm)
+        pipeline.draft(conn, settings, args.top, not args.no_llm, args.refresh)
         pipeline.report(conn, settings)
     elif args.cmd == "list":
         rows = conn.execute("""SELECT b.id, b.name, b.category, b.distance_km, b.status, s.score

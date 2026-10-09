@@ -20,9 +20,11 @@ def haversine_km(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
 def normalise_website(url: str | None) -> str | None:
     if not url:
         return None
-    url = url.strip().split()[0].rstrip(";,")
-    if not url:
+    # OSM sometimes stores several values: "https://a.com.au;https://facebook.com/a"
+    parts = [u for u in re.split(r"[;,\s]+", url.strip()) if u]
+    if not parts:
         return None
+    url = next((u for u in parts if is_own_site(u if "://" in u else "https://" + u)), parts[0])
     if not re.match(r"^https?://", url, re.I):
         url = "https://" + url
     return url
@@ -30,8 +32,14 @@ def normalise_website(url: str | None) -> str | None:
 
 # Website hosts that are not the business's own site.
 NOT_OWN_SITE = (
-    "facebook.com", "instagram.com", "linktr.ee", "google.com", "goo.gl",
-    "business.site", "yellowpages.com.au", "hipages.com.au", "oneflare.com.au",
+    "facebook.com", "fb.com", "instagram.com", "linktr.ee", "google.com", "goo.gl", "g.page",
+    "business.site", "yellowpages.com.au", "hipages.com.au", "oneflare.com.au", "truelocal.com.au",
+    "localsearch.com.au", "startlocal.com.au", "hotfrog.com.au", "yelp.com", "yelp.com.au",
+    "wordofmouth.com.au", "airtasker.com", "gumtree.com.au", "linkedin.com", "youtube.com",
+    "tiktok.com", "x.com", "twitter.com", "tripadvisor.com", "tripadvisor.com.au", "booking.com",
+    "airbnb.com", "airbnb.com.au", "abr.business.gov.au", "wikipedia.org", "seek.com.au",
+    "healthengine.com.au", "hotdoc.com.au", "realestate.com.au", "domain.com.au", "bing.com",
+    "duckduckgo.com", "wa.me", "m.me",
 )
 
 

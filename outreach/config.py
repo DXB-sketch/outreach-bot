@@ -35,6 +35,7 @@ class Settings:
     llm_min_interval: float
     # Discovery
     google_places_api_key: str
+    brave_api_key: str
     # Sender identity (used in drafts and the crawler User-Agent)
     sender_name: str
     sender_business: str
@@ -79,6 +80,7 @@ def get_settings() -> Settings:
         llm_strong_models=strong,
         llm_min_interval=float(os.environ.get("LLM_MIN_INTERVAL", "2")),
         google_places_api_key=os.environ.get("GOOGLE_PLACES_API_KEY", ""),
+        brave_api_key=os.environ.get("BRAVE_API_KEY", ""),
         sender_name=os.environ.get("SENDER_NAME", "[Your name]"),
         sender_business=os.environ.get("SENDER_BUSINESS", "Monolith Web Studio"),
         sender_email=os.environ.get("SENDER_EMAIL", ""),
